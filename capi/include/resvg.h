@@ -375,6 +375,20 @@ bool resvg_get_node_bbox(const resvg_render_tree *tree,
  */
 void resvg_tree_destroy(resvg_render_tree *tree);
 
+/**
+ * @brief Exports the usvg text for the Render tree.
+ *
+ * @param tree Render tree.
+ * @param file_path File path where usvg will be written to.
+ * @param formatted Uses indenting if true.
+ * @return \b false if invalid string parameter.
+ * @return \b false if ailed to create a file.
+ * @return \b false if failed to write a file.
+ */
+bool resvg_export_usvg(const resvg_render_tree *tree,
+                       const char * file_path, 
+                       bool formatted);
+
 #ifdef RESVG_CAIRO_BACKEND
 /**
  * @brief Renders the #resvg_render_tree to file.
@@ -526,6 +540,22 @@ void resvg_skia_render_to_canvas_by_id(const resvg_render_tree *tree,
                                        resvg_size size,
                                        const char *id,
                                        void *surface);
+
+/**
+ * @brief Renders a rectangluar portion of the #resvg_render_tree and scales it uniformly to the surface size.
+ *
+ * @param tree Render tree.
+ * @param opt Rendering options.
+ * @param img_size Canvas size.
+ * @param src Source rectangle.
+ * @param skia Canvas.
+ */
+void resvg_skia_render_rect_to_canvas(const resvg_render_tree *tree,
+                                 const resvg_options *opt,
+                                 resvg_size img_size,
+                                 const resvg_rect *src,
+                                 void *surface);
+
 #endif /* RESVG_SKIA_BACKEND */
 
 #endif /* RESVG_H */

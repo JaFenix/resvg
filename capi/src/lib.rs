@@ -396,6 +396,43 @@ pub extern "C" fn resvg_skia_render_to_canvas(
     resvg::backend_skia::render_to_canvas(&tree.0, &opt, img_size, &mut surface);
 }
 
+#[cfg(feature = "skia-backend")]
+#[no_mangle]
+pub extern "C" fn resvg_skia_render_rect_to_canvas(
+    tree: *const resvg_render_tree,
+    opt: *const resvg_options,
+    img_size: resvg_size,
+    src: *const resvg_rect,
+    surface: *mut skia::skiac_surface,
+) {  
+    let tree = unsafe {
+        assert!(!tree.is_null());
+        &*tree
+    };
+
+    let mut surface = unsafe { skia::Surface::from_raw(surface) };
+    let img_size = resvg::ScreenSize::new(img_size.width, img_size.height).unwrap();
+
+    let opt = to_native_opt(unsafe {
+        assert!(!opt.is_null());
+        &*opt
+    });
+    
+    let src = {
+        if src.is_null() {
+            let size = tree.0.svg_node().size;
+            usvg::Rect::new(0.0, 0.0, size.width(), size.height()).unwrap()
+        }
+        else {
+            unsafe { usvg::Rect::new((*src).x, (*src).y, (*src).width, (*src).height).unwrap() }
+        }
+    };
+
+    resvg::backend_skia::render_rect_to_canvas(&tree.0, &opt, img_size, &src, &mut surface);
+}
+
+
+
 #[cfg(feature = "qt-backend")]
 #[no_mangle]
 pub extern "C" fn resvg_qt_render_to_canvas_by_id(
