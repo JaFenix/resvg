@@ -5,6 +5,8 @@
 #![allow(non_camel_case_types)]
 
 use std::ffi::CStr;
+use std::fs;
+use std::io::Write;
 use std::fmt;
 use std::os::raw::c_char;
 use std::path;
@@ -749,6 +751,55 @@ pub extern "C" fn resvg_get_node_transform(
     }
 
     false
+}
+
+
+#[no_mangle]
+pub extern "C" fn resvg_export_usvg(tree: &usvg::Tree, file_path: *const c_char, formatted: bool) -> bool {
+
+    let file_path = match cstr_to_str(file_path) {
+        Some(v) => v,
+        None => {
+            warn!("invalid string parameter");
+            return false;
+        }
+    };
+
+    let mut f = match fs::File::create(file_path) {
+        Ok(f) => f,
+        Err(_) => {
+            warn!("failed to create a file {:?}", file_path);
+            return false;
+        }
+    };
+
+    let xml_opt = {
+
+        if formatted {
+            usvg::XmlOptions {
+                use_single_quote: true,
+                indent: usvg::XmlIndent::Spaces(4),
+                attributes_indent: usvg::XmlIndent::Spaces(4),
+            }
+        }
+        else {
+            usvg::XmlOptions {
+                use_single_quote: true,
+                indent: usvg::XmlIndent::None,
+                attributes_indent: usvg::XmlIndent::None,
+            }
+        }        
+    };
+
+    match f.write_all(tree.to_string(xml_opt).as_bytes()) {
+        Err(_) => {
+            warn!("failed to write a file {:?}", file_path);
+            return false;
+        }
+        Ok(()) => {}
+    }
+
+    return true;
 }
 
 fn cstr_to_str(
