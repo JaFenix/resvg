@@ -407,7 +407,7 @@ pub extern "C" fn resvg_skia_render_rect_to_canvas(
         &*tree
     };
 
-    let mut surface = unsafe { skia::Surface::from_raw(surface) };
+    let mut surface = unsafe { skia::Surface::from_ptr(surface).unwrap() };
     let img_size = resvg::ScreenSize::new(img_size.width, img_size.height).unwrap();
 
     let opt = to_native_opt(unsafe {

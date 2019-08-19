@@ -123,7 +123,7 @@ pub fn render_rect_to_canvas(
     src: &usvg::Rect,
     surface: &mut skia::Surface,
 ) {        
-    let mut render = SkiaFlatRender::new(&tree, opt, img_size, surface);
+    let mut layers = create_layers(img_size);
 
     // Translate and scale the source rectangle (after viewbox transformation) into the image size.
     let mut dst_ts = usvg::Transform::new_scale(
@@ -131,16 +131,16 @@ pub fn render_rect_to_canvas(
         img_size.height() as f64 / src.height()
     );
     dst_ts.translate(-src.left(), -src.top());
-    render.apply_transform(dst_ts);
+    surface.concat(&dst_ts.to_native());
 
     let node = &tree.root();
     let mut ts = node.abs_transform();
     ts.append(&node.transform());
 
     // Apply the viewbox transform to the viewport (instead of the image size)
-    render.apply_viewbox(tree.svg_node().view_box, tree.svg_node().size.to_screen_size());
-    render.apply_transform(ts);    
-    render.render_node(node);
+    apply_viewbox_transform(tree.svg_node().view_box, tree.svg_node().size.to_screen_size(), surface);
+    surface.concat(&ts.to_native());    
+    render_node(node, opt, &mut layers, surface);
 }
 
 /// Renders SVG node to canvas.
