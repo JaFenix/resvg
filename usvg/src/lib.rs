@@ -57,14 +57,13 @@ Full spec can be found [here](https://github.com/RazrFalcon/usvg/blob/master/doc
 [SVG]: https://en.wikipedia.org/wiki/Scalable_Vector_Graphics
 */
 
-#![doc(html_root_url = "https://docs.rs/usvg/0.7.0")]
+#![doc(html_root_url = "https://docs.rs/usvg/0.8.0")]
 
 #![warn(missing_docs)]
 #![warn(missing_debug_implementations)]
 #![warn(missing_copy_implementations)]
 
 /// Unwraps `Option` and invokes `return` on `None`.
-#[macro_export]
 macro_rules! try_opt {
     ($task:expr) => {
         match $task {
@@ -75,7 +74,6 @@ macro_rules! try_opt {
 }
 
 /// Unwraps `Option` and invokes `return $ret` on `None`.
-#[macro_export]
 macro_rules! try_opt_or {
     ($task:expr, $ret:expr) => {
         match $task {
@@ -86,7 +84,6 @@ macro_rules! try_opt_or {
 }
 
 /// Unwraps `Option` and invokes `return` on `None` with a warning.
-#[macro_export]
 macro_rules! try_opt_warn {
     ($task:expr, $msg:expr) => {
         match $task {
@@ -109,7 +106,6 @@ macro_rules! try_opt_warn {
 }
 
 /// Unwraps `Option` and invokes `return $ret` on `None` with a warning.
-#[macro_export]
 macro_rules! try_opt_warn_or {
     ($task:expr, $ret:expr, $msg:expr) => {
         match $task {
@@ -131,6 +127,38 @@ macro_rules! try_opt_warn_or {
     };
 }
 
+macro_rules! impl_enum_default {
+    ($name:ident, $def_value:ident) => {
+        impl Default for $name {
+            #[inline]
+            fn default() -> Self {
+                $name::$def_value
+            }
+        }
+    };
+}
+
+macro_rules! impl_enum_from_str {
+    ($name:ident, $($string:pat => $result:expr),+) => {
+        impl crate::svgtree::EnumFromStr for $name {
+            fn enum_from_str(s: &str) -> Option<Self> {
+                match s {
+                    $($string => Some($result)),+,
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+macro_rules! matches {
+    ($expression:expr, $($pattern:tt)+) => {
+        match $expression {
+            $($pattern)+ => true,
+            _ => false
+        }
+    }
+}
 
 pub mod utils;
 mod convert;
@@ -138,16 +166,12 @@ mod error;
 mod fontdb;
 mod geom;
 mod options;
+mod svgtree;
 mod tree;
 
 /// Shorthand names for modules.
 mod short {
-    pub use svgdom::{
-        LengthUnit as Unit,
-        ElementId as EId,
-        AttributeId as AId,
-        AttributeValue as AValue,
-    };
+    pub use svgtypes::LengthUnit as Unit;
 }
 
 pub use xmlwriter::Options as XmlOptions;
@@ -166,6 +190,7 @@ pub trait IsDefault: Default {
 }
 
 impl<T: Default + PartialEq + Copy> IsDefault for T {
+    #[inline]
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -179,6 +204,7 @@ pub trait IsValidLength {
 }
 
 impl IsValidLength for f64 {
+    #[inline]
     fn is_valid_length(&self) -> bool {
         *self > 0.0
     }
@@ -192,6 +218,7 @@ pub trait TransformFromBBox: Sized {
 }
 
 impl TransformFromBBox for tree::Transform {
+    #[inline]
     fn from_bbox(bbox: Rect) -> Self {
         Self::new(bbox.width(), 0.0, 0.0, bbox.height(), bbox.x(), bbox.y())
     }

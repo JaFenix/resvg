@@ -2,7 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-use svgdom::{FuzzyEq, FuzzyZero};
+
+use svgtypes::{FuzzyEq, FuzzyZero};
 
 use crate::geom::f64_bound;
 
@@ -10,12 +11,14 @@ use crate::geom::f64_bound;
 macro_rules! wrap {
     ($name:ident) => {
         impl From<f64> for $name {
+            #[inline]
             fn from(n: f64) -> Self {
                 $name::new(n)
             }
         }
 
         impl PartialEq for $name {
+            #[inline]
             fn eq(&self, other: &Self) -> bool {
                 self.0.fuzzy_eq(&other.0)
             }
@@ -24,18 +27,19 @@ macro_rules! wrap {
 }
 
 
-/// An opacity value.
+/// A normalized value.
 ///
-/// Just like `f64` but immutable and guarantee to be in the 0..1 range.
+/// Just like `f64` but immutable and guarantee to be in a 0..1 range.
 #[derive(Clone, Copy, Debug)]
-pub struct Opacity(f64);
+pub struct NormalizedValue(f64);
 
-impl Opacity {
-    /// Creates a new `Opacity` value.
+impl NormalizedValue {
+    /// Creates a new `NormalizedValue` value.
+    #[inline]
     pub fn new(n: f64) -> Self {
         debug_assert!(n.is_finite());
         debug_assert!(n >= 0.0 && n <= 1.0);
-        Opacity(f64_bound(0.0, n, 1.0))
+        NormalizedValue(f64_bound(0.0, n, 1.0))
     }
 
     /// Returns an underlying value.
@@ -45,20 +49,32 @@ impl Opacity {
     }
 }
 
-impl Default for Opacity {
-    fn default() -> Self {
-        Opacity::new(1.0)
+impl std::ops::Mul<NormalizedValue> for NormalizedValue {
+    type Output = Self;
+
+    #[inline]
+    fn mul(self, rhs: NormalizedValue) -> Self::Output {
+        NormalizedValue::new(self.0 * rhs.0)
     }
 }
 
-wrap!(Opacity);
+impl Default for NormalizedValue {
+    #[inline]
+    fn default() -> Self {
+        NormalizedValue::new(1.0)
+    }
+}
 
+wrap!(NormalizedValue);
 
-/// An alias to `Opacity`.
-pub type StopOffset = Opacity;
+/// An alias to `NormalizedValue`.
+pub type Opacity = NormalizedValue;
 
-/// An alias to `Opacity`.
-pub type CompositingCoefficient = Opacity;
+/// An alias to `NormalizedValue`.
+pub type StopOffset = NormalizedValue;
+
+/// An alias to `NormalizedValue`.
+pub type CompositingCoefficient = NormalizedValue;
 
 
 /// A `stroke-width` value.
@@ -69,6 +85,7 @@ pub struct StrokeWidth(f64);
 
 impl StrokeWidth {
     /// Creates a new `StrokeWidth` value.
+    #[inline]
     pub fn new(n: f64) -> Self {
         debug_assert!(n.is_finite());
         debug_assert!(n > 0.0);
@@ -87,6 +104,7 @@ impl StrokeWidth {
 }
 
 impl Default for StrokeWidth {
+    #[inline]
     fn default() -> Self {
         StrokeWidth::new(1.0)
     }
@@ -103,6 +121,7 @@ pub struct StrokeMiterlimit(f64);
 
 impl StrokeMiterlimit {
     /// Creates a new `StrokeMiterlimit` value.
+    #[inline]
     pub fn new(n: f64) -> Self {
         debug_assert!(n.is_finite());
         debug_assert!(n >= 1.0);
@@ -120,6 +139,7 @@ impl StrokeMiterlimit {
 }
 
 impl Default for StrokeMiterlimit {
+    #[inline]
     fn default() -> Self {
         StrokeMiterlimit::new(4.0)
     }
@@ -136,6 +156,7 @@ pub struct FontSize(f64);
 
 impl FontSize {
     /// Creates a new `FontSize` value.
+    #[inline]
     pub fn new(n: f64) -> Self {
         debug_assert!(n.is_finite());
         debug_assert!(n > 0.0);
@@ -164,6 +185,7 @@ pub struct PositiveNumber(f64);
 
 impl PositiveNumber {
     /// Creates a new `PositiveNumber` value.
+    #[inline]
     pub fn new(n: f64) -> Self {
         debug_assert!(n.is_finite());
         debug_assert!(!n.is_sign_negative());
@@ -181,6 +203,7 @@ impl PositiveNumber {
     }
 
     /// Checks that the current number is zero.
+    #[inline]
     pub fn is_zero(&self) -> bool {
         self.0.is_fuzzy_zero()
     }

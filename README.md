@@ -64,8 +64,9 @@ Also, we do not test against Chrome, Firefox, Inkscape and Batik because they ha
 
 - The Oxygen icon theme contains 4947 files.
 - All images were converted from `.svgz` to `.svg` beforehand.
-- `resvg` is slower than `librsvg` because the Oxygen icon theme uses Gaussian blur heavily, which is expensive.
-  And `librsvg` uses box blur optimization and multithreading, while `resvg` always uses a single-threaded IIR blur (at least for now).
+- `resvg` is slower than `librsvg` because the Oxygen icon theme uses Gaussian blur heavily,
+  and `librsvg` has a faster blur implementation.
+  Also, `librsvg` uses native `cairo` clipping, [which is incorrect](https://razrfalcon.github.io/resvg-test-suite/svg-support-table.html#e-clipPath) but faster.
 - QtSvg doesn't support `filter`, `clipPath`, `mask` and `pattern` that are heavily used in the Oxygen icon theme.
   So it's actually very slow.
 
@@ -73,11 +74,11 @@ Also, we do not test against Chrome, Firefox, Inkscape and Batik because they ha
 
 - `resvg` – rendering backends implementation
   - [`usvg`](./usvg) – an SVG simplification tool
-    - [`svgdom`](https://github.com/RazrFalcon/svgdom) – a DOM-like SVG tree
-      - [`roxmltree`](https://github.com/RazrFalcon/roxmltree) – a DOM-like XML tree
-        - [`xmlparser`](https://github.com/RazrFalcon/xmlparser) – an XML parser
-      - [`svgtypes`](https://github.com/RazrFalcon/svgtypes) – SVG types parser and writer
-    - [`ttf-parser`](https://github.com/RazrFalcon/ttf-parser) – a TrueType parser
+    - [`roxmltree`](https://github.com/RazrFalcon/roxmltree) – a DOM-like XML tree
+      - [`xmlparser`](https://github.com/RazrFalcon/xmlparser) – an XML parser
+    - [`svgtypes`](https://github.com/RazrFalcon/svgtypes) – SVG types parser and writer
+    - [`simplecss`](https://github.com/RazrFalcon/simplecss) – a simple CSS2 parser
+    - [`ttf-parser`](https://github.com/RazrFalcon/ttf-parser) – a TrueType/OpenType parser
     - [`xmlwriter`](https://github.com/RazrFalcon/xmlwriter) – a simple XML writer
     - [`rctree`](https://github.com/RazrFalcon/rctree) – a DOM-like tree
   - [`resvg-qt`](./bindings/resvg-qt) – minimal bindings to [Qt]

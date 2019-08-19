@@ -8,10 +8,11 @@ use std::rc::Rc;
 use crate::qt;
 use rgb::FromSlice;
 use log::warn;
-use usvg::{try_opt_or, ColorInterpolation as ColorSpace};
+use usvg::ColorInterpolation as ColorSpace;
 
-use crate::{prelude::*, backend_utils::*};
-use crate::backend_utils::filter::{Error, Filter, ImageExt};
+use crate::prelude::*;
+use crate::filter::{self, Error, Filter, ImageExt};
+use crate::ConvTransform;
 
 type Image = filter::Image<qt::Image>;
 type FilterResult = filter::FilterResult<qt::Image>;
@@ -150,13 +151,22 @@ impl Filter<qt::Image> for QtFilter {
         ts: &usvg::Transform,
         input: Image,
     ) -> Result<Image, Error> {
-        let (std_dx, std_dy) = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
+        let (std_dx, std_dy, box_blur)
+            = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
 
         let input = input.into_color_space(cs)?;
         let mut buffer = input.take()?;
 
         let (w, h) = (buffer.width(), buffer.height());
-        filter::blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy, 4);
+        filter::into_premultiplied(buffer.data_mut().as_bgra_mut());
+
+        if box_blur {
+            filter::box_blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy);
+        } else {
+            filter::iir_blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy);
+        }
+
+        filter::from_premultiplied(buffer.data_mut().as_bgra_mut());
 
         Ok(Image::from_image(buffer, cs))
     }
@@ -383,6 +393,37 @@ impl Filter<qt::Image> for QtFilter {
         }
 
         Ok(Image::from_image(buffer, ColorSpace::SRGB))
+    }
+
+    fn apply_component_transfer(
+        fe: &usvg::FeComponentTransfer,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+
+        for pixel in buffer.data_mut().as_bgra_mut() {
+            pixel.r = fe.func_r.apply(pixel.r);
+            pixel.g = fe.func_g.apply(pixel.g);
+            pixel.b = fe.func_b.apply(pixel.b);
+            pixel.a = fe.func_a.apply(pixel.a);
+        }
+
+        Ok(Image::from_image(buffer, cs))
+    }
+
+    fn apply_color_matrix(
+        fe: &usvg::FeColorMatrix,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+
+        filter::color_matrix::apply(&fe.kind, buffer.data_mut().as_bgra_mut());
+
+        Ok(Image::from_image(buffer, cs))
     }
 
     fn apply_to_canvas(

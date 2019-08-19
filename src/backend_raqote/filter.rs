@@ -8,10 +8,11 @@ use std::rc::Rc;
 use rgb::FromSlice;
 use log::warn;
 
-use usvg::{try_opt_or, ColorInterpolation as ColorSpace};
+use usvg::ColorInterpolation as ColorSpace;
 
-use crate::{prelude::*, backend_utils::*};
-use crate::backend_utils::filter::{Error, Filter, ImageExt};
+use crate::prelude::*;
+use crate::filter::{self, Error, Filter, ImageExt};
+use crate::ConvTransform;
 use super::{ColorExt, RaqoteDrawTargetExt};
 
 type Image = filter::Image<raqote::DrawTarget>;
@@ -72,7 +73,7 @@ impl ImageExt for raqote::DrawTarget {
 
     fn into_srgb(&mut self) {
         let data =  self.get_data_u8_mut();
-        from_premultiplied(data);
+        filter::from_premultiplied(data.as_bgra_mut());
 
         for p in data.as_bgra_mut() {
             p.r = filter::LINEAR_RGB_TO_SRGB_TABLE[p.r as usize];
@@ -80,12 +81,12 @@ impl ImageExt for raqote::DrawTarget {
             p.b = filter::LINEAR_RGB_TO_SRGB_TABLE[p.b as usize];
         }
 
-        into_premultiplied(data);
+        filter::into_premultiplied(data.as_bgra_mut());
     }
 
     fn into_linear_rgb(&mut self) {
         let data =  self.get_data_u8_mut();
-        from_premultiplied(data);
+        filter::from_premultiplied(data.as_bgra_mut());
 
         for p in data.as_bgra_mut() {
             p.r = filter::SRGB_TO_LINEAR_RGB_TABLE[p.r as usize];
@@ -93,7 +94,7 @@ impl ImageExt for raqote::DrawTarget {
             p.b = filter::SRGB_TO_LINEAR_RGB_TABLE[p.b as usize];
         }
 
-        into_premultiplied(data);
+        filter::into_premultiplied(data.as_bgra_mut());
     }
 }
 
@@ -116,28 +117,6 @@ fn copy_image(
     });
 
     Ok(new_image)
-}
-
-fn from_premultiplied(data: &mut [u8]) {
-    // https://www.cairographics.org/manual/cairo-Image-Surfaces.html#cairo-format-t
-
-    for p in data.as_bgra_mut() {
-        let a = p.a as f64 / 255.0;
-        p.b = (p.b as f64 / a + 0.5) as u8;
-        p.g = (p.g as f64 / a + 0.5) as u8;
-        p.r = (p.r as f64 / a + 0.5) as u8;
-    }
-}
-
-fn into_premultiplied(data: &mut [u8]) {
-    // https://www.cairographics.org/manual/cairo-Image-Surfaces.html#cairo-format-t
-
-    for p in data.as_bgra_mut() {
-        let a = p.a as f64 / 255.0;
-        p.b = (p.b as f64 * a + 0.5) as u8;
-        p.g = (p.g as f64 * a + 0.5) as u8;
-        p.r = (p.r as f64 * a + 0.5) as u8;
-    }
 }
 
 struct RaqoteFilter;
@@ -200,7 +179,8 @@ impl Filter<raqote::DrawTarget> for RaqoteFilter {
         ts: &usvg::Transform,
         input: Image,
     ) -> Result<Image, Error> {
-        let (std_dx, std_dy) = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
+        let (std_dx, std_dy, box_blur)
+            = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
 
         let input = input.into_color_space(cs)?;
         let mut buffer = input.take()?;
@@ -208,9 +188,11 @@ impl Filter<raqote::DrawTarget> for RaqoteFilter {
         let (w, h) = (buffer.width() as u32, buffer.height() as u32);
 
         let data = buffer.get_data_u8_mut();
-        from_premultiplied(data);
-        filter::blur::apply(data, w, h, std_dx, std_dy, 4);
-        into_premultiplied(data);
+        if box_blur {
+            filter::box_blur::apply(data, w, h, std_dx, std_dy);
+        } else {
+            filter::iir_blur::apply(data, w, h, std_dx, std_dy);
+        }
 
         Ok(Image::from_image(buffer, cs))
     }
@@ -427,6 +409,45 @@ impl Filter<raqote::DrawTarget> for RaqoteFilter {
 
         dt.set_transform(&raqote::Transform::default());
         Ok(Image::from_image(dt, ColorSpace::SRGB))
+    }
+
+    fn apply_component_transfer(
+        fe: &usvg::FeComponentTransfer,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+
+        let data = buffer.get_data_u8_mut();
+        filter::from_premultiplied(data.as_bgra_mut());
+
+        for pixel in data.as_bgra_mut() {
+            pixel.r = fe.func_r.apply(pixel.r);
+            pixel.g = fe.func_g.apply(pixel.g);
+            pixel.b = fe.func_b.apply(pixel.b);
+            pixel.a = fe.func_a.apply(pixel.a);
+        }
+
+        filter::into_premultiplied(data.as_bgra_mut());
+
+        Ok(Image::from_image(buffer, cs))
+    }
+
+    fn apply_color_matrix(
+        fe: &usvg::FeColorMatrix,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+
+        let data = buffer.get_data_u8_mut();
+        filter::from_premultiplied(data.as_bgra_mut());
+        filter::color_matrix::apply(&fe.kind, data.as_bgra_mut());
+        filter::into_premultiplied(data.as_bgra_mut());
+
+        Ok(Image::from_image(buffer, cs))
     }
 
     fn apply_to_canvas(

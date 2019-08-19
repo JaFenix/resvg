@@ -7,13 +7,14 @@
 use std::cell::Ref;
 use std::path;
 
-pub use self::{nodes::*, attributes::*};
-use crate::{utils, Rect, Error, Options, XmlOptions};
+pub use self::{nodes::*, attributes::*, pathdata::*};
+use crate::{svgtree, Rect, Error, Options, XmlOptions};
 
 mod attributes;
 mod export;
 mod nodes;
 mod numbers;
+mod pathdata;
 
 /// Basic traits for tree manipulations.
 pub mod prelude {
@@ -52,23 +53,14 @@ impl Tree {
 
     /// Parses `Tree` from the SVG string.
     pub fn from_str(text: &str, opt: &Options) -> Result<Self, Error> {
-        let dom_opt = svgdom::ParseOptions {
-            skip_invalid_attributes: true,
-            skip_invalid_css: true,
-            skip_unresolved_classes: true,
-        };
-
-        let doc = svgdom::Document::from_str_with_opt(text, &dom_opt)
-            .map_err(Error::ParsingFailed)?;
-
+        let doc = svgtree::Document::parse(text).map_err(Error::ParsingFailed)?;
         Self::from_dom(doc, &opt)
     }
 
     /// Parses `Tree` from the `svgdom::Document`.
     ///
     /// An empty `Tree` will be returned on any error.
-    fn from_dom(mut doc: svgdom::Document, opt: &Options) -> Result<Self, Error> {
-        super::convert::prepare_doc(&mut doc);
+    fn from_dom(doc: svgtree::Document, opt: &Options) -> Result<Self, Error> {
         super::convert::convert_doc(&doc, opt)
     }
 
@@ -93,11 +85,13 @@ impl Tree {
     }
 
     /// Returns the `Svg` node.
+    #[inline]
     pub fn root(&self) -> Node {
         self.root.clone()
     }
 
     /// Returns the `Svg` node value.
+    #[inline]
     pub fn svg_node(&self) -> Ref<Svg> {
         Ref::map(self.root.borrow(), |v| {
             match *v {
@@ -108,6 +102,7 @@ impl Tree {
     }
 
     /// Returns the `Defs` node.
+    #[inline]
     pub fn defs(&self) -> Node {
         self.root.first_child().unwrap()
     }
@@ -160,6 +155,7 @@ impl Tree {
     }
 
     /// Converts an SVG.
+    #[inline]
     pub fn to_string(&self, opt: XmlOptions) -> String {
         export::convert(self, opt)
     }
@@ -200,10 +196,12 @@ pub trait NodeExt {
 }
 
 impl NodeExt for Node {
+    #[inline]
     fn id(&self) -> Ref<str> {
         Ref::map(self.borrow(), |v| v.id())
     }
 
+    #[inline]
     fn transform(&self) -> Transform {
         self.borrow().transform()
     }
@@ -222,16 +220,19 @@ impl NodeExt for Node {
         abs_ts
     }
 
+    #[inline]
     fn append_kind(&mut self, kind: NodeKind) -> Node {
         let new_node = Node::new(kind);
         self.append(new_node.clone());
         new_node
     }
 
+    #[inline]
     fn tree(&self) -> Tree {
         Tree { root: self.root() }
     }
 
+    #[inline]
     fn calculate_bbox(&self) -> Option<Rect> {
         calc_node_bbox(self, self.abs_transform())
     }
@@ -286,11 +287,11 @@ fn calc_node_bbox(
 
     match *node.borrow() {
         NodeKind::Path(ref path) => {
-            utils::path_bbox(&path.segments, path.stroke.as_ref(), Some(ts2))
+            path.data.bbox_with_transform(ts2, path.stroke.as_ref())
         }
         NodeKind::Image(ref img) => {
-            let segments = utils::rect_to_path(img.view_box.rect);
-            utils::path_bbox(&segments, None, Some(ts2))
+            let path = PathData::from_rect(img.view_box.rect);
+            path.bbox_with_transform(ts2, None)
         }
         NodeKind::Svg(_) | NodeKind::Group(_) => {
             let mut bbox = Rect::new_bbox();

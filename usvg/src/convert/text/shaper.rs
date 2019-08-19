@@ -6,8 +6,9 @@ use kurbo::{ParamCurveArclen, ParamCurve, ParamCurveDeriv};
 use harfbuzz_rs as harfbuzz;
 use unicode_vo::Orientation as CharOrientation;
 use ttf_parser::GlyphId;
+use kurbo::Vec2;
 
-use crate::{tree, utils, fontdb, convert::prelude::*};
+use crate::{tree, fontdb, convert::prelude::*};
 use super::convert::{
     ByteIndex,
     CharacterPosition,
@@ -96,7 +97,7 @@ pub struct OutlinedCluster {
     pub has_relative_shift: bool,
 
     /// An actual outline.
-    pub path: Vec<tree::PathSegment>,
+    pub path: tree::PathData,
 
     /// A cluster's transform that contains it's position, rotation, etc.
     pub transform: tree::Transform,
@@ -338,13 +339,12 @@ fn outline_cluster(
 ) -> OutlinedCluster {
     debug_assert!(!glyphs.is_empty());
 
-    let mut path = Vec::new();
+    let mut path = tree::PathData::new();
     let mut advance = 0.0;
     let mut x = 0.0;
 
     for glyph in glyphs {
-        let outline = db.outline(glyph.font.id, glyph.id).unwrap_or(svgdom::Path::new());
-        let mut outline = crate::convert::path::convert(outline);
+        let mut outline = db.outline(glyph.font.id, glyph.id).unwrap_or_default();
 
         let sx = glyph.font.scale(font_size);
 
@@ -363,7 +363,7 @@ fn outline_cluster(
             // TODO: should be done only inside a single text span
             ts.translate(x + glyph.dx as f64, glyph.dy as f64);
 
-            utils::transform_path(&mut outline, &ts);
+            outline.transform(ts);
 
             path.extend_from_slice(&outline);
         }
@@ -435,7 +435,7 @@ fn find_font_for_char(
 /// Returns the last text position. The next text chunk should start from that position.
 pub fn resolve_clusters_positions(
     chunk: &TextChunk,
-    offset: usize,
+    char_offset: usize,
     pos_list: &[CharacterPosition],
     rotate_list: &[f64],
     writing_mode: WritingMode,
@@ -443,10 +443,14 @@ pub fn resolve_clusters_positions(
 ) -> (f64, f64) {
     match chunk.text_flow {
         TextFlow::Horizontal => {
-            resolve_clusters_positions_horizontal(chunk, offset, pos_list, rotate_list, clusters)
+            resolve_clusters_positions_horizontal(
+                chunk, char_offset, pos_list, rotate_list, clusters,
+            )
         }
         TextFlow::Path(ref path) => {
-            resolve_clusters_positions_path(chunk, offset, path, rotate_list, writing_mode, clusters)
+            resolve_clusters_positions_path(
+                chunk, char_offset, path, pos_list, rotate_list, writing_mode, clusters,
+            )
         }
     }
 }
@@ -486,14 +490,17 @@ fn resolve_clusters_positions_horizontal(
 
 fn resolve_clusters_positions_path(
     chunk: &TextChunk,
-    offset: usize,
+    char_offset: usize,
     path: &TextPath,
+    pos_list: &[CharacterPosition],
     rotate_list: &[f64],
     writing_mode: WritingMode,
     clusters: &mut [OutlinedCluster],
 ) -> (f64, f64) {
     let mut last_x = 0.0;
     let mut last_y = 0.0;
+
+    let mut dy = 0.0;
 
     // In the text path mode, chunk's x/y coordinates provide an additional offset along the path.
     // The X coordinate is used in a horizontal mode, and Y in vertical.
@@ -505,7 +512,9 @@ fn resolve_clusters_positions_path(
     let start_offset = chunk_offset + path.start_offset
         + process_anchor(chunk.anchor, clusters_length(clusters));
 
-    let normals = collect_normals(clusters, &path.segments, start_offset);
+    let normals = collect_normals(
+        chunk, clusters, &path.path, pos_list, char_offset, start_offset,
+    );
     for (cluster, normal) in clusters.iter_mut().zip(normals) {
         let (x, y, angle) = match normal {
             Some(normal) => {
@@ -526,9 +535,22 @@ fn resolve_clusters_positions_path(
         cluster.transform.translate(x - half_advance, y);
         cluster.transform.rotate_at(angle, half_advance, 0.0);
 
-        // TODO: Shift by dx/dy. We have to shift along the normal, which is troublesome.
+        let cp = char_offset + cluster.byte_idx.code_point_at(&chunk.text);
+        if let Some(pos) = pos_list.get(cp) {
+            dy += pos.dy.unwrap_or(0.0);
+        }
 
-        let cp = offset + cluster.byte_idx.code_point_at(&chunk.text);
+        let baseline_shift = chunk.span_at(cluster.byte_idx)
+            .map(|span| span.baseline_shift)
+            .unwrap_or(0.0);
+
+        // Shift only by `dy` since we already applied `dx`
+        // during offset along the path calculation.
+        if !dy.is_fuzzy_zero() || !baseline_shift.is_fuzzy_zero() {
+            let shift = Vec2::from_angle(angle) + Vec2::new(0.0, dy - baseline_shift);
+            cluster.transform.translate(shift.x, shift.y);
+        }
+
         if let Some(angle) = rotate_list.get(cp).cloned() {
             if !angle.is_fuzzy_zero() {
                 cluster.transform.rotate(angle);
@@ -566,11 +588,14 @@ struct PathNormal {
 }
 
 fn collect_normals(
+    chunk: &TextChunk,
     clusters: &[OutlinedCluster],
-    segments: &[tree::PathSegment],
+    path: &tree::PathData,
+    pos_list: &[CharacterPosition],
+    char_offset: usize,
     offset: f64,
 ) -> Vec<Option<PathNormal>> {
-    debug_assert!(!segments.is_empty());
+    debug_assert!(!path.is_empty());
 
     let mut offsets = Vec::with_capacity(clusters.len());
     let mut normals = Vec::with_capacity(clusters.len());
@@ -579,6 +604,12 @@ fn collect_normals(
         for cluster in clusters {
             // Clusters should be rotated by the x-midpoint x baseline position.
             let half_advance = cluster.advance / 2.0;
+
+            // Include relative position.
+            let cp = char_offset + cluster.byte_idx.code_point_at(&chunk.text);
+            if let Some(pos) = pos_list.get(cp) {
+                advance += pos.dx.unwrap_or(0.0);
+            }
 
             let offset = advance + half_advance;
 
@@ -593,7 +624,7 @@ fn collect_normals(
     }
 
     let (mut prev_mx, mut prev_my, mut prev_x, mut prev_y) = {
-        if let tree::PathSegment::MoveTo { x, y } = segments[0] {
+        if let tree::PathSegment::MoveTo { x, y } = path[0] {
             (x, y, x, y)
         } else {
             unreachable!();
@@ -604,10 +635,10 @@ fn collect_normals(
         -> kurbo::CubicBez
     {
         kurbo::CubicBez {
-            p0: kurbo::Vec2::new(px, py),
-            p1: kurbo::Vec2::new(x1, y1),
-            p2: kurbo::Vec2::new(x2, y2),
-            p3: kurbo::Vec2::new(x, y),
+            p0: Vec2::new(px, py),
+            p1: Vec2::new(x1, y1),
+            p2: Vec2::new(x2, y2),
+            p3: Vec2::new(x, y),
         }
     }
 
@@ -615,8 +646,8 @@ fn collect_normals(
         -> kurbo::CubicBez
     {
         let line = kurbo::Line {
-            p0: kurbo::Vec2::new(px, py),
-            p1: kurbo::Vec2::new(x, y),
+            p0: Vec2::new(px, py),
+            p1: Vec2::new(x, y),
         };
         let p1 = line.eval(0.33);
         let p2 = line.eval(0.66);
@@ -624,7 +655,7 @@ fn collect_normals(
     }
 
     let mut length = 0.0;
-    for seg in segments {
+    for seg in path.iter() {
         let curve = match *seg {
             tree::PathSegment::MoveTo { x, y } => {
                 prev_mx = x;
@@ -653,7 +684,7 @@ fn collect_normals(
 
                 let pos = curve.eval(offset);
                 let d = curve.deriv().eval(offset);
-                let d = kurbo::Vec2::new(-d.y, d.x); // tangent
+                let d = Vec2::new(-d.y, d.x); // tangent
                 let angle = d.atan2().to_degrees() - 90.0;
 
                 normals.push(Some(PathNormal {
@@ -725,7 +756,7 @@ fn script_supports_letter_spacing(
 ) -> bool {
     use unicode_script::Script;
 
-    match script {
+    !matches!(script,
           Script::Arabic
         | Script::Syriac
         | Script::Nko
@@ -741,9 +772,7 @@ fn script_supports_letter_spacing(
         | Script::Sharada
         | Script::Syloti_Nagri
         | Script::Tirhuta
-        | Script::Ogham => false,
-        _ => true,
-    }
+        | Script::Ogham)
 }
 
 /// Applies the `word-spacing` property to a text chunk clusters.
@@ -772,29 +801,13 @@ pub fn apply_word_spacing(
     }
 }
 
-pub fn shift_clusters_baseline(
-    chunk: &TextChunk,
-    clusters: &mut [OutlinedCluster],
-) {
-    for span in &chunk.spans {
-        for cluster in clusters.iter_mut() {
-            if span.contains(cluster.byte_idx) {
-                cluster.transform.translate(0.0, -span.baseline_shift);
-            }
-        }
-    }
-}
-
 /// Checks that the selected character is a word separator.
 ///
 /// According to: https://www.w3.org/TR/css-text-3/#word-separator
 fn is_word_separator_characters(
     c: char,
 ) -> bool {
-    match c as u32 {
-        0x0020 | 0x00A0 | 0x1361 | 0x010100 | 0x010101 | 0x01039F | 0x01091F => true,
-        _ => false,
-    }
+    matches!(c as u32, 0x0020 | 0x00A0 | 0x1361 | 0x010100 | 0x010101 | 0x01039F | 0x01091F)
 }
 
 /// Rotates clusters according to
@@ -818,7 +831,7 @@ pub fn apply_writing_mode(
             ts.translate(cluster.advance / 2.0, 0.0);
             ts.rotate(-90.0);
             ts.translate(-cluster.advance / 2.0, -dy);
-            utils::transform_path(&mut cluster.path, &ts);
+            cluster.path.transform(ts);
 
             // Move "baseline" to the middle and make height equal to advance.
             cluster.ascent = cluster.advance / 2.0;

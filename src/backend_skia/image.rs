@@ -3,11 +3,29 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use crate::skia;
-use usvg::try_opt;
 
 use crate::prelude::*;
-use crate::backend_utils::{self, ConvTransform, Image};
+use crate::image;
+use crate::ConvTransform;
 
+
+pub fn draw(
+    image: &usvg::Image,
+    opt: &Options,
+    surface: &mut skia::Surface,
+) -> Rect {
+    if image.visibility != usvg::Visibility::Visible {
+        return image.view_box.rect;
+    }
+
+    if image.format == usvg::ImageFormat::SVG {
+        draw_svg(&image.data, image.view_box, opt, surface);
+    } else {
+        draw_raster(image.format, &image.data, image.view_box, image.rendering_mode, opt, surface);
+    }
+
+    image.view_box.rect
+}
 
 pub fn draw_raster(
     format: usvg::ImageFormat,
@@ -17,11 +35,11 @@ pub fn draw_raster(
     opt: &Options,
     surface: &mut skia::Surface,
 ) {
-    let img = try_opt!(backend_utils::image::load_raster(format, data, opt));
+    let img = try_opt!(image::load_raster(format, data, opt));
 
     let image = {
         let (w, h) = img.size.dimensions();
-        let mut image = usvg::try_opt_warn_or!(
+        let mut image = try_opt_warn_or!(
             skia::Surface::new_rgba(w, h), (),
             "Failed to create a {}x{} surface.", w, h
         );
@@ -36,26 +54,25 @@ pub fn draw_raster(
         filter = skia::FilterQuality::None;
     }
 
-    let mut canvas = surface.canvas_mut();
-    canvas.save();
+    surface.save();
 
     if view_box.aspect.slice {
         let r = view_box.rect;
-        canvas.set_clip_rect(r.x(), r.y(), r.width(), r.height());
+        surface.set_clip_rect(r.x(), r.y(), r.width(), r.height());
     }
 
-    let r = backend_utils::image::image_rect(&view_box, img.size);
-    canvas.draw_surface_rect(&image, r.x(), r.y(), r.width(), r.height(), filter);
+    let r = image::image_rect(&view_box, img.size);
+    surface.draw_surface_rect(&image, r.x(), r.y(), r.width(), r.height(), filter);
 
     // Revert.
-    canvas.restore();
+    surface.restore();
 }
 
-fn image_to_surface(image: &Image, surface: &mut [u8]) {
+fn image_to_surface(image: &image::Image, surface: &mut [u8]) {
     // Surface is always ARGB.
     const SURFACE_CHANNELS: usize = 4;
 
-    use backend_utils::image::ImageData;
+    use crate::image::ImageData;
     use rgb::FromSlice;
 
     let mut i = 0;
@@ -114,15 +131,19 @@ pub fn draw_svg(
     opt: &Options,
     surface: &mut skia::Surface,
 ) {
-    let (tree, sub_opt) = try_opt!(backend_utils::image::load_sub_svg(data, opt));
+    let (tree, sub_opt) = try_opt!(image::load_sub_svg(data, opt));
 
     let img_size = tree.svg_node().size.to_screen_size();
-    let (ts, clip) = backend_utils::image::prepare_sub_svg_geom(view_box, img_size);
+    let (ts, clip) = image::prepare_sub_svg_geom(view_box, img_size);
+
+    surface.save();
 
     if let Some(clip) = clip {
-        surface.canvas_mut().set_clip_rect(clip.x(), clip.y(), clip.width(), clip.height());
+        surface.set_clip_rect(clip.x(), clip.y(), clip.width(), clip.height());
     }
 
-    surface.canvas_mut().concat(&ts.to_native());
+    surface.concat(&ts.to_native());
     super::render_to_canvas(&tree, &sub_opt, img_size, surface);
+
+    surface.restore();
 }

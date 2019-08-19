@@ -59,7 +59,7 @@ fn process() -> Result<(), String> {
             .unwrap();
     }
 
-    let backend: Box<Render> = match args.backend_name.as_str() {
+    let backend: Box<dyn Render> = match args.backend_name.as_str() {
         #[cfg(feature = "cairo-backend")]
         "cairo" => Box::new(resvg::backend_cairo::Backend),
         #[cfg(feature = "qt-backend")]
@@ -106,7 +106,7 @@ fn process() -> Result<(), String> {
         };
 
         match img {
-            Some(img) => { timed!("Saving", img.save(out_png)); }
+            Some(mut img) => { timed!("Saving", img.save_png(out_png)); }
             None => { bail!("failed to allocate an image") }
         }
     };

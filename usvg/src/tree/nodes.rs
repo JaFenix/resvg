@@ -3,9 +3,11 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 use std::ops::Deref;
+use std::rc::Rc;
 
 use crate::geom::*;
 use super::attributes::*;
+use super::pathdata::PathData;
 
 // TODO: implement Default for all
 
@@ -119,7 +121,7 @@ pub struct Path {
     /// Segments list.
     ///
     /// All segments are in absolute coordinates.
-    pub segments: Vec<PathSegment>,
+    pub data: Rc<PathData>,
 }
 
 impl Default for Path {
@@ -131,7 +133,7 @@ impl Default for Path {
             fill: None,
             stroke: None,
             rendering_mode: ShapeRendering::default(),
-            segments: Vec::new(),
+            data: Rc::new(PathData::default()),
         }
     }
 }
@@ -503,6 +505,8 @@ pub struct FilterPrimitive {
 #[derive(Clone, Debug)]
 pub enum FilterKind {
     FeBlend(FeBlend),
+    FeColorMatrix(FeColorMatrix),
+    FeComponentTransfer(FeComponentTransfer),
     FeComposite(FeComposite),
     FeFlood(FeFlood),
     FeGaussianBlur(FeGaussianBlur),
@@ -532,6 +536,156 @@ pub struct FeBlend {
     ///
     /// `mode` in the SVG.
     pub mode: FeBlendMode,
+}
+
+
+/// A color matrix filter primitive.
+///
+/// `feColorMatrix` element in the SVG.
+#[derive(Clone, Debug)]
+pub struct FeColorMatrix {
+    /// Identifies input for the given filter primitive.
+    ///
+    /// `in` in the SVG.
+    pub input: FilterInput,
+
+    /// A matrix kind.
+    ///
+    /// `type` in the SVG.
+    pub kind: FeColorMatrixKind,
+}
+
+/// A color matrix filter primitive kind.
+#[derive(Clone, Debug)]
+#[allow(missing_docs)]
+pub enum FeColorMatrixKind {
+    Matrix(Vec<f64>), // Guarantee to have 20 numbers.
+    Saturate(NormalizedValue),
+    HueRotate(f64),
+    LuminanceToAlpha,
+}
+
+impl Default for FeColorMatrixKind {
+    fn default() -> Self {
+        FeColorMatrixKind::Matrix(vec![
+            1.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 1.0, 0.0,
+        ])
+    }
+}
+
+
+/// A component-wise remapping filter primitive.
+///
+/// `feComponentTransfer` element in the SVG.
+#[derive(Clone, Debug)]
+pub struct FeComponentTransfer {
+    /// Identifies input for the given filter primitive.
+    ///
+    /// `in` in the SVG.
+    pub input: FilterInput,
+
+    /// `feFuncR` in the SVG.
+    pub func_r: TransferFunction,
+
+    /// `feFuncG` in the SVG.
+    pub func_g: TransferFunction,
+
+    /// `feFuncB` in the SVG.
+    pub func_b: TransferFunction,
+
+    /// `feFuncA` in the SVG.
+    pub func_a: TransferFunction,
+}
+
+/// A transfer function used by `FeComponentTransfer`.
+///
+/// https://www.w3.org/TR/SVG11/filters.html#transferFuncElements
+#[derive(Clone, Debug)]
+pub enum TransferFunction {
+    /// Keeps a component as is.
+    Identity,
+
+    /// Applies a linear interpolation to a component.
+    ///
+    /// The number list can be empty.
+    Table(Vec<f64>),
+
+    /// Applies a step function to a component.
+    ///
+    /// The number list can be empty.
+    Discrete(Vec<f64>),
+
+    /// Applies a linear shift to a component.
+    #[allow(missing_docs)]
+    Linear {
+        slope: f64,
+        intercept: f64,
+    },
+
+    /// Applies an exponential shift to a component.
+    #[allow(missing_docs)]
+    Gamma {
+        amplitude: f64,
+        exponent: f64,
+        offset: f64,
+    },
+}
+
+impl TransferFunction {
+    /// Applies a transfer function to a provided color component.
+    ///
+    /// Requires a non-premultiplied color component.
+    pub fn apply(&self, c: u8) -> u8 {
+        (f64_bound(0.0, self.apply_impl(c as f64 / 255.0), 1.0) * 255.0) as u8
+    }
+
+    fn apply_impl(&self, c: f64) -> f64 {
+        use std::cmp;
+
+        match self {
+            TransferFunction::Identity => {
+                c
+            }
+            TransferFunction::Table(ref values) => {
+                if values.is_empty() {
+                    return c;
+                }
+
+                let n = values.len() - 1;
+                let k = (c * (n as f64)).floor() as usize;
+                let k = cmp::min(k, n);
+                if k == n {
+                    return values[k];
+                }
+
+                let vk = values[k];
+                let vk1 = values[k + 1];
+                let k = k as f64;
+                let n = n as f64;
+
+                vk + (c - k / n) * n * (vk1 - vk)
+            }
+            TransferFunction::Discrete(ref values) => {
+                if values.is_empty() {
+                    return c;
+                }
+
+                let n = values.len();
+                let k = (c * (n as f64)).floor() as usize;
+
+                values[cmp::min(k, n - 1)]
+            }
+            TransferFunction::Linear { slope, intercept } => {
+                slope * c + intercept
+            }
+            TransferFunction::Gamma { amplitude, exponent, offset } => {
+                amplitude * c.powf(*exponent) + offset
+            }
+        }
+    }
 }
 
 
