@@ -14,10 +14,75 @@ It can be used as a simple SVG to PNG converted.
 And as an embeddable library to paint SVG on an application native canvas.
 */
 
-#![doc(html_root_url = "https://docs.rs/resvg/0.7.0")]
+#![doc(html_root_url = "https://docs.rs/resvg/0.8.0")]
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+/// Unwraps `Option` and invokes `return` on `None`.
+macro_rules! try_opt {
+    ($task:expr) => {
+        match $task {
+            Some(v) => v,
+            None => return,
+        }
+    };
+}
+
+/// Unwraps `Option` and invokes `return $ret` on `None`.
+macro_rules! try_opt_or {
+    ($task:expr, $ret:expr) => {
+        match $task {
+            Some(v) => v,
+            None => return $ret,
+        }
+    };
+}
+
+/// Unwraps `Option` and invokes `return` on `None` with a warning.
+#[allow(unused_macros)]
+macro_rules! try_opt_warn {
+    ($task:expr, $msg:expr) => {
+        match $task {
+            Some(v) => v,
+            None => {
+                log::warn!($msg);
+                return;
+            }
+        }
+    };
+    ($task:expr, $fmt:expr, $($arg:tt)*) => {
+        match $task {
+            Some(v) => v,
+            None => {
+                log::warn!($fmt, $($arg)*);
+                return;
+            }
+        }
+    };
+}
+
+/// Unwraps `Option` and invokes `return $ret` on `None` with a warning.
+macro_rules! try_opt_warn_or {
+    ($task:expr, $ret:expr, $msg:expr) => {
+        match $task {
+            Some(v) => v,
+            None => {
+                log::warn!($msg);
+                return $ret;
+            }
+        }
+    };
+    ($task:expr, $ret:expr, $fmt:expr, $($arg:tt)*) => {
+        match $task {
+            Some(v) => v,
+            None => {
+                log::warn!($fmt, $($arg)*);
+                return $ret;
+            }
+        }
+    };
+}
 
 #[cfg(feature = "cairo-backend")]
 pub use cairo;
@@ -47,8 +112,9 @@ pub mod backend_skia;
 pub mod backend_raqote;
 
 pub mod utils;
-mod backend_utils;
+mod filter;
 mod geom;
+mod image;
 mod layers;
 mod options;
 
@@ -74,7 +140,7 @@ pub trait Render {
         &self,
         tree: &usvg::Tree,
         opt: &Options,
-    ) -> Option<Box<OutputImage>>;
+    ) -> Option<Box<dyn OutputImage>>;
 
     /// Renders SVG node to image.
     ///
@@ -83,26 +149,26 @@ pub trait Render {
         &self,
         node: &usvg::Node,
         opt: &Options,
-    ) -> Option<Box<OutputImage>>;
+    ) -> Option<Box<dyn OutputImage>>;
 }
 
 /// A generic interface for output image.
 pub trait OutputImage {
     /// Saves rendered image to the selected path.
-    fn save(
-        &self,
+    fn save_png(
+        &mut self,
         path: &std::path::Path,
     ) -> bool;
 }
 
 
-/// Returns default backend.
+/// Returns a default backend.
 ///
 /// - If both backends are enabled - cairo backend will be returned.
 /// - If no backends are enabled - will panic.
 /// - Otherwise will return a corresponding backend.
 #[allow(unreachable_code)]
-pub fn default_backend() -> Box<Render> {
+pub fn default_backend() -> Box<dyn Render> {
     #[cfg(feature = "cairo-backend")]
     {
         return Box::new(backend_cairo::Backend);
@@ -124,4 +190,50 @@ pub fn default_backend() -> Box<Render> {
     }
 
     unreachable!("at least one backend must be enabled")
+}
+
+pub(crate) fn use_shape_antialiasing(
+    mode: usvg::ShapeRendering,
+) -> bool {
+    match mode {
+        usvg::ShapeRendering::OptimizeSpeed         => false,
+        usvg::ShapeRendering::CrispEdges            => false,
+        usvg::ShapeRendering::GeometricPrecision    => true,
+    }
+}
+
+/// Converts an image to an alpha mask.
+pub(crate) fn image_to_mask(
+    data: &mut [rgb::alt::BGRA8],
+    img_size: ScreenSize,
+) {
+    let width = img_size.width();
+    let height = img_size.height();
+
+    let coeff_r = 0.2125 / 255.0;
+    let coeff_g = 0.7154 / 255.0;
+    let coeff_b = 0.0721 / 255.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let ref mut pixel = data[idx];
+
+            let r = pixel.r as f64;
+            let g = pixel.g as f64;
+            let b = pixel.b as f64;
+
+            let luma = r * coeff_r + g * coeff_g + b * coeff_b;
+
+            pixel.r = 0;
+            pixel.g = 0;
+            pixel.b = 0;
+            pixel.a = f64_bound(0.0, luma * 255.0, 255.0) as u8;
+        }
+    }
+}
+
+pub(crate) trait ConvTransform<T> {
+    fn to_native(&self) -> T;
+    fn from_native(_: &T) -> Self;
 }

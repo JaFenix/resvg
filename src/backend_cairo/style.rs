@@ -2,10 +2,8 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-use usvg::try_opt;
-
-use crate::{prelude::*, backend_utils::ConvTransform};
-use super::{ReCairoContextExt, FlatRender, CairoFlatRender};
+use crate::{prelude::*, ConvTransform};
+use super::ReCairoContextExt;
 
 
 pub fn fill(
@@ -206,9 +204,8 @@ fn prepare_pattern(
         sub_cr.scale(bbox.width(), bbox.height());
     }
 
-    let ref tree = node.tree();
-    let mut render = CairoFlatRender::new(tree, opt, img_size, &sub_cr);
-    render.render_group(node);
+    let mut layers = super::create_layers(img_size);
+    super::render_group(node, opt, &mut layers, &sub_cr);
 
     let mut ts = usvg::Transform::default();
     ts.append(&pattern.transform);

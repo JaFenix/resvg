@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use resvg::prelude::*;
 
 fn main() {
@@ -51,11 +53,11 @@ fn main() {
         fill,
         stroke: None,
         rendering_mode: usvg::ShapeRendering::default(),
-        segments: utils::rect_to_path(Rect::new(20.0, 20.0, 160.0, 160.0).unwrap()),
+        data: Rc::new(usvg::PathData::from_rect(Rect::new(20.0, 20.0, 160.0, 160.0).unwrap())),
     }));
 
     println!("{}", rtree.to_string(usvg::XmlOptions::default()));
 
-    let img = backend.render_to_image(&rtree, &opt).unwrap();
-    img.save(std::path::Path::new("out.png"));
+    let mut img = backend.render_to_image(&rtree, &opt).unwrap();
+    img.save_png(std::path::Path::new("out.png"));
 }

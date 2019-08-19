@@ -291,7 +291,7 @@ fn render_to_image(
     tree: *const resvg_render_tree,
     opt: *const resvg_options,
     file_path: *const c_char,
-    backend: Box<resvg::Render>,
+    backend: Box<dyn resvg::Render>,
 ) -> i32 {
     let tree = unsafe {
         assert!(!tree.is_null());
@@ -309,14 +309,14 @@ fn render_to_image(
     });
 
     let img = backend.render_to_image(&tree.0, &opt);
-    let img = match img {
+    let mut img = match img {
         Some(img) => img,
         None => {
             return ErrorId::NoCanvas as i32;
         }
     };
 
-    match img.save(path::Path::new(file_path)) {
+    match img.save_png(path::Path::new(file_path)) {
         true => ErrorId::Ok as i32,
         false => ErrorId::FileWriteFailed as i32,
     }
@@ -382,7 +382,7 @@ pub extern "C" fn resvg_skia_render_to_canvas(
         &*tree
     };
 
-    let mut surface = unsafe { skia::Surface::from_raw(surface) };
+    let mut surface = unsafe { skia::Surface::from_ptr(surface).unwrap() };
     let img_size = resvg::ScreenSize::new(img_size.width, img_size.height).unwrap();
 
     let opt = to_native_opt(unsafe {
@@ -549,7 +549,7 @@ pub extern "C" fn resvg_skia_render_to_canvas_by_id(
         return;
     }
 
-    let mut surface = unsafe { skia::Surface::from_raw(surface) };
+    let mut surface = unsafe { skia::Surface::from_ptr(surface).unwrap() };
     let size = resvg::ScreenSize::new(size.width, size.height).unwrap();
 
     let opt = to_native_opt(unsafe {

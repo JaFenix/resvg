@@ -8,10 +8,11 @@ use std::rc::Rc;
 use crate::skia;
 use rgb::FromSlice;
 use log::warn;
-use usvg::{try_opt_or, ColorInterpolation as ColorSpace};
+use usvg::ColorInterpolation as ColorSpace;
 
-use crate::{prelude::*, backend_utils::*};
-use crate::backend_utils::filter::{Error, Filter, ImageExt};
+use crate::prelude::*;
+use crate::filter::{self, Error, Filter, ImageExt};
+use crate::ConvTransform;
 
 type Image = filter::Image<skia::Surface>;
 type FilterResult = filter::FilterResult<skia::Surface>;
@@ -46,15 +47,17 @@ impl ImageExt for skia::Surface {
         paint.set_color(0, 0, 0, 0);
         paint.set_blend_mode(skia::BlendMode::Clear);
 
-        let mut canvas = self.canvas_mut();
-        canvas.draw_rect(0.0, 0.0, self.width() as f64, region.y() as f64, &paint);
-        canvas.draw_rect(0.0, 0.0, region.x() as f64, self.height() as f64, &paint);
-        canvas.draw_rect(region.right() as f64, 0.0, self.width() as f64, self.height() as f64, &paint);
-        canvas.draw_rect(0.0, region.bottom() as f64, self.width() as f64, self.height() as f64, &paint);
+        let w = self.width() as f64;
+        let h = self.height() as f64;
+
+        self.draw_rect(0.0, 0.0, w, region.y() as f64, &paint);
+        self.draw_rect(0.0, 0.0, region.x() as f64, h, &paint);
+        self.draw_rect(region.right() as f64, 0.0, w, h, &paint);
+        self.draw_rect(0.0, region.bottom() as f64, w, h, &paint);
     }
 
     fn clear(&mut self) {
-        self.canvas_mut().clear();
+        skia::Canvas::clear(self);
     }
 
     fn into_srgb(&mut self) {
@@ -76,7 +79,7 @@ impl ImageExt for skia::Surface {
 
 fn create_surface(width: u32, height: u32) -> Result<skia::Surface, Error> {
     let mut surface = skia::Surface::new_rgba(width, height).ok_or(Error::AllocFailed)?;
-    surface.canvas_mut().clear();
+    surface.clear();
     Ok(surface)
 }
 
@@ -145,13 +148,23 @@ impl Filter<skia::Surface> for SkiaFilter {
         ts: &usvg::Transform,
         input: Image,
     ) -> Result<Image, Error> {
-        let (std_dx, std_dy) = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
+        let (std_dx, std_dy, box_blur)
+            = try_opt_or!(Self::resolve_std_dev(fe, units, bbox, ts), Ok(input));
 
         let input = input.into_color_space(cs)?;
         let mut buffer = input.take()?;
 
         let (w, h) = (buffer.width(), buffer.height());
-        filter::blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy, 4);
+        // Skia surface can be RGBA, but it will not affect the blur algorithm.
+        filter::into_premultiplied(buffer.data_mut().as_bgra_mut());
+
+        if box_blur {
+            filter::box_blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy);
+        } else {
+            filter::iir_blur::apply(&mut buffer.data_mut(), w, h, std_dx, std_dy);
+        }
+
+        filter::from_premultiplied(buffer.data_mut().as_bgra_mut());
 
         Ok(Image::from_image(buffer, cs))
     }
@@ -166,12 +179,11 @@ impl Filter<skia::Surface> for SkiaFilter {
         let (dx, dy) = try_opt_or!(Self::resolve_offset(fe, units, bbox, ts), Ok(input));
 
         let mut buffer = create_surface(input.width(), input.height())?;
-        let mut canvas = buffer.canvas_mut();
 
-        canvas.reset_matrix();
-        canvas.draw_surface(input.as_ref(), dx, dy, 255, skia::BlendMode::SourceOver,
+        buffer.reset_matrix();
+        buffer.draw_surface(input.as_ref(), dx, dy, 255, skia::BlendMode::SourceOver,
                             skia::FilterQuality::Low);
-        canvas.flush();
+        buffer.flush();
 
         Ok(Image::from_image(buffer, input.color_space))
     }
@@ -187,9 +199,8 @@ impl Filter<skia::Surface> for SkiaFilter {
         let input2 = input2.into_color_space(cs)?;
 
         let mut buffer = create_surface(region.width(), region.height())?;
-        let mut canvas = buffer.canvas_mut();
 
-        canvas.draw_surface(input2.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
+        buffer.draw_surface(input2.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
                             skia::FilterQuality::Low);
 
         let blend_mode = match fe.mode {
@@ -200,7 +211,7 @@ impl Filter<skia::Surface> for SkiaFilter {
             usvg::FeBlendMode::Lighten => skia::BlendMode::Lighten,
         };
 
-        canvas.draw_surface(input1.as_ref(), 0.0, 0.0, 255, blend_mode,
+        buffer.draw_surface(input1.as_ref(), 0.0, 0.0, 255, blend_mode,
                             skia::FilterQuality::Low);
 
         Ok(Image::from_image(buffer, cs))
@@ -277,8 +288,7 @@ impl Filter<skia::Surface> for SkiaFilter {
             return Ok(Image::from_image(buffer, cs));
         }
 
-        let mut canvas = buffer.canvas_mut();
-        canvas.draw_surface(input2.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
+        buffer.draw_surface(input2.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
                             skia::FilterQuality::Low);
         let blend_mode = match fe.operator {
             Operator::Over => skia::BlendMode::SourceOver,
@@ -288,7 +298,7 @@ impl Filter<skia::Surface> for SkiaFilter {
             Operator::Xor => skia::BlendMode::Xor,
             Operator::Arithmetic { .. } => skia::BlendMode::SourceOver,
         };
-        canvas.draw_surface(input1.as_ref(), 0.0, 0.0, 255, blend_mode,
+        buffer.draw_surface(input1.as_ref(), 0.0, 0.0, 255, blend_mode,
                             skia::FilterQuality::Low);
 
         Ok(Image::from_image(buffer, cs))
@@ -302,16 +312,15 @@ impl Filter<skia::Surface> for SkiaFilter {
         surface: &skia::Surface,
     ) -> Result<Image, Error> {
         let mut buffer = create_surface(region.width(), region.height())?;
-        let mut canvas = buffer.canvas_mut();
-        canvas.reset_matrix();
+        buffer.reset_matrix();
 
         for input in &fe.inputs {
             let input = Self::get_input(input, region, &results, surface)?;
             let input = input.into_color_space(cs)?;
-            canvas.draw_surface(input.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
+            buffer.draw_surface(input.as_ref(), 0.0, 0.0, 255, skia::BlendMode::SourceOver,
                                 skia::FilterQuality::Low);
         }
-        canvas.flush();
+        buffer.flush();
 
         Ok(Image::from_image(buffer, cs))
     }
@@ -324,7 +333,7 @@ impl Filter<skia::Surface> for SkiaFilter {
         let alpha = f64_bound(0.0, fe.opacity.value() * 255.0, 255.0) as u8;
 
         let mut buffer = create_surface(region.width(), region.height())?;
-        buffer.canvas_mut().fill(c.red, c.green, c.blue, alpha);
+        buffer.fill(c.red, c.green, c.blue, alpha);
 
         Ok(Image::from_image(buffer, ColorSpace::SRGB))
     }
@@ -343,10 +352,9 @@ impl Filter<skia::Surface> for SkiaFilter {
         let mut paint = skia::Paint::new();
         paint.set_shader(&shader);
 
-        let mut canvas = buffer.canvas_mut();
-        canvas.draw_rect(0.0, 0.0, region.width() as f64, region.height() as f64, &paint);
+        buffer.draw_rect(0.0, 0.0, region.width() as f64, region.height() as f64, &paint);
 
-        buffer.canvas_mut().reset_matrix();
+        buffer.reset_matrix();
         Ok(Image::from_image(buffer, ColorSpace::SRGB))
     }
 
@@ -361,11 +369,9 @@ impl Filter<skia::Surface> for SkiaFilter {
         match fe.data {
             usvg::FeImageKind::None => {}
             usvg::FeImageKind::Image(ref data, format) => {
-                let mut canvas = buffer.canvas_mut();
-
                 let dx = (subregion.x() - region.x()) as f64;
                 let dy = (subregion.y() - region.y()) as f64;
-                canvas.translate(dx, dy);
+                buffer.translate(dx, dy);
 
                 let view_box = usvg::ViewBox {
                     rect: subregion.translate_to(0, 0).to_rect(),
@@ -383,8 +389,61 @@ impl Filter<skia::Surface> for SkiaFilter {
             usvg::FeImageKind::Use(..) => {}
         }
 
-        buffer.canvas_mut().reset_matrix();
+        buffer.reset_matrix();
         Ok(Image::from_image(buffer, ColorSpace::SRGB))
+    }
+
+    fn apply_component_transfer(
+        fe: &usvg::FeComponentTransfer,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+
+        if skia::Surface::is_bgra() {
+            for pixel in buffer.data_mut().as_bgra_mut() {
+                pixel.r = fe.func_r.apply(pixel.r);
+                pixel.g = fe.func_g.apply(pixel.g);
+                pixel.b = fe.func_b.apply(pixel.b);
+                pixel.a = fe.func_a.apply(pixel.a);
+            }
+        } else {
+            for pixel in buffer.data_mut().as_rgba_mut() {
+                pixel.r = fe.func_r.apply(pixel.r);
+                pixel.g = fe.func_g.apply(pixel.g);
+                pixel.b = fe.func_b.apply(pixel.b);
+                pixel.a = fe.func_a.apply(pixel.a);
+            }
+        }
+
+        Ok(Image::from_image(buffer, cs))
+    }
+
+    fn apply_color_matrix(
+        fe: &usvg::FeColorMatrix,
+        cs: ColorSpace,
+        input: Image,
+    ) -> Result<Image, Error> {
+        use std::mem::swap;
+
+        let input = input.into_color_space(cs)?;
+        let mut buffer = input.take()?;
+        let mut data = buffer.data_mut();
+
+        // RGBA -> BGRA.
+        if !skia::Surface::is_bgra() {
+            data.as_bgra_mut().iter_mut().for_each(|p| swap(&mut p.r, &mut p.b));
+        }
+
+        filter::color_matrix::apply(&fe.kind, data.as_bgra_mut());
+
+        // BGRA -> RGBA.
+        if !skia::Surface::is_bgra() {
+            data.as_bgra_mut().iter_mut().for_each(|p| swap(&mut p.r, &mut p.b));
+        }
+
+        Ok(Image::from_image(buffer, cs))
     }
 
     fn apply_to_canvas(
@@ -394,11 +453,10 @@ impl Filter<skia::Surface> for SkiaFilter {
     ) -> Result<(), Error> {
         let input = input.into_color_space(ColorSpace::SRGB)?;
 
-        let mut canvas = surface.canvas_mut();
-        canvas.reset_matrix();
-        canvas.clear();
-        canvas.draw_surface(input.as_ref(), region.x() as f64, region.y() as f64, 255,
-                            skia::BlendMode::SourceOver, skia::FilterQuality::Low);
+        surface.reset_matrix();
+        surface.clear();
+        surface.draw_surface(input.as_ref(), region.x() as f64, region.y() as f64, 255,
+                             skia::BlendMode::SourceOver, skia::FilterQuality::Low);
 
         Ok(())
     }

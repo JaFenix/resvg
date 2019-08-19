@@ -7,20 +7,54 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 This changelog also contains important changes in dependencies.
 
 ## [Unreleased]
+
+## [0.8.0] - 2019-08-17
 ### Added
-- (resvg) A [Skia](https://skia.org/) backend thanks to
+- A [Skia](https://skia.org/) backend thanks to
   [JaFenix](https://github.com/JaFenix).
+- `feComponentTransfer` support.
+- `feColorMatrix` support.
+- A better CSS support.
+- An `*.otf` fonts support.
+- (usvg) `dx`, `dy` are supported inside `textPath` now.
+- Use a box blur for `feGaussianBlur` with `stdDeviation`>=2.
+  This is 4-8 times faster than IIR blur.
+  Thanks to [Shnatsel](https://github.com/Shnatsel).
 
 ### Changed
-- All backend are using the `image` crate for raster images loading now.
-- Use `pico-args` instead of `gumdrop`.
+- All backends are using the `image` crate for raster images loading now.
+- Use `pico-args` instead of `gumdrop` to reduced the build time of `tools/rendersvg`
+  and `tools/usvg`.
 - (usvg) The `xmlwriter` is used for SVG generation now.
   Almost 2x faster than generating an `svgdom`.
-- `svgdom` is no longer reexported.
+- (usvg) Optimize font database initialization. Almost 50% faster.
+- Use a lower PNG compression ratio to speed up PNG generation.
+  Depending on a backend and image can be 2-4x faster.
+- `OutputImage::save` -> `OutputImage::save_png`.
+- (usvg) `Path::segments` -> `Path::data`.
+- Cairo backend compilation is 2x faster now due to overall changes.
+- Performance improvements (Oxygen Icon theme SVG-to-PNG):
+  - cairo-backend: 22% faster
+  - qt-backend: 20% faster
+  - raqote-backend: 34% faster
+
+### Fixed
+- (qt-api) A default font resolving.
+- (usvg) `baseline-shift` processing inside `textPath`.
+- (usvg) Remove all `tref` element children.
+- (usvg) `tref` with `xml:space` resolving.
+- (usvg) Ignore nested `tref`.
+- (usvg) Ignore invalid `clipPath` children that were referenced via `use`.
+- (usvg) `currentColor` will always fallback to black now.
+  Previously, `stroke` was set to `none` which is incorrect.
+- (usvg) `use` can reference an element inside a non-SVG element now.
+- (usvg) Collect all styles for generic fonts and not only *Regular*.
+- (svgdom) Parse only presentation attributes from the `style` element and attribute.
 
 ### Removed
 - (cairo-backend) `gdk-pixbuf` dependency.
 - (qt-backend) JPEG image format plugin dependency.
+- `svgdom` dependency.
 
 ## [0.7.0] - 2019-06-19
 ### Added
@@ -241,7 +275,8 @@ This changelog also contains important changes in dependencies.
 ### Fixed
 - `font-size` attribute inheritance during `use` resolving.
 
-[Unreleased]: https://github.com/RazrFalcon/resvg/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/RazrFalcon/resvg/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/RazrFalcon/resvg/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/RazrFalcon/resvg/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/RazrFalcon/resvg/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/RazrFalcon/resvg/compare/v0.5.0...v0.6.0

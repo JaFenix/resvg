@@ -2,7 +2,9 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-use crate::{tree, tree::prelude::*, utils};
+use std::rc::Rc;
+
+use crate::{svgtree, tree, tree::prelude::*};
 use super::prelude::*;
 
 mod convert;
@@ -18,17 +20,18 @@ mod private {
     /// A type-safe container for a `text` node.
     ///
     /// This way we can be sure that we are passing the `text` node and not just a random node.
-    pub struct TextNode(svgdom::Node);
+    #[derive(Clone, Copy)]
+    pub struct TextNode<'a>(svgtree::Node<'a>);
 
-    impl TextNode {
-        pub fn new(node: svgdom::Node) -> Self {
-            debug_assert!(node.is_tag_name(EId::Text));
+    impl<'a> TextNode<'a> {
+        pub fn new(node: svgtree::Node<'a>) -> Self {
+            debug_assert!(node.has_tag_name(EId::Text));
             TextNode(node)
         }
     }
 
-    impl std::ops::Deref for TextNode {
-        type Target = svgdom::Node;
+    impl<'a> std::ops::Deref for TextNode<'a> {
+        type Target = svgtree::Node<'a>;
 
         fn deref(&self) -> &Self::Target {
             &self.0
@@ -50,35 +53,32 @@ struct DecorationSpan {
 
 
 pub fn convert(
-    node: &svgdom::Node,
+    node: svgtree::Node,
     state: &State,
     parent: &mut tree::Node,
     tree: &mut tree::Tree,
 ) {
-    {
-        let mut db = state.db.borrow_mut();
-        db.populate();
-    }
+    state.db.borrow_mut().populate();
 
-    let text_node = &TextNode::new(node.clone());
+    let text_node = TextNode::new(node.clone());
     let mut new_paths = text_to_paths(text_node, state, parent, tree);
 
     let mut bbox = Rect::new_bbox();
     for path in &new_paths {
-        if let Some(r) = utils::path_bbox(&path.segments, None, None) {
+        if let Some(r) = path.data.bbox() {
             bbox = bbox.expand(r);
         }
     }
 
     if new_paths.len() == 1 {
         // Copy `text` id to the first path.
-        new_paths[0].id = node.id().clone();
+        new_paths[0].id = node.element_id().to_string();
     }
 
     let mut parent = if state.opt.keep_named_groups && new_paths.len() > 1 {
         // Create a group will all paths that was created during text-to-path conversion.
         parent.append_kind(tree::NodeKind::Group(tree::Group {
-            id: node.id().clone(),
+            id: node.element_id().to_string(),
             .. tree::Group::default()
         }))
     } else {
@@ -94,7 +94,7 @@ pub fn convert(
 }
 
 fn text_to_paths(
-    text_node: &TextNode,
+    text_node: TextNode,
     state: &State,
     parent: &mut tree::Node,
     tree: &mut tree::Tree,
@@ -102,7 +102,7 @@ fn text_to_paths(
     let pos_list = resolve_positions_list(text_node, state);
     let rotate_list = resolve_rotate_list(text_node);
     let writing_mode = convert_writing_mode(text_node);
-    let mut text_ts = text_node.attributes().get_transform(AId::Transform);
+    let mut text_ts = tree::Transform::default();
 
     let mut chunks = collect_text_chunks(text_node, &pos_list, state, tree);
     let mut char_offset = 0;
@@ -127,13 +127,6 @@ fn text_to_paths(
         let curr_pos = shaper::resolve_clusters_positions(
             chunk, char_offset, &pos_list, &rotate_list, writing_mode, &mut clusters
         );
-
-        if let TextFlow::Path(_) = chunk.text_flow {
-            // Since a path flow can point clusters in any direction,
-            // we can't simply shift a global transform by Y axis.
-            // We have to shift each cluster individually.
-            shaper::shift_clusters_baseline(&chunk, &mut clusters);
-        }
 
         if writing_mode == WritingMode::TopToBottom {
             if let TextFlow::Horizontal = chunk.text_flow {
@@ -210,7 +203,7 @@ fn convert_span(
     parent: &mut tree::Node,
     dump_clusters: bool,
 ) -> Option<tree::Path> {
-    let mut segments = Vec::new();
+    let mut path_data = tree::PathData::new();
 
     for cluster in clusters {
         if !cluster.visible {
@@ -224,21 +217,24 @@ fn convert_span(
                 dump_cluster(cluster, ts, parent);
             }
 
-            let mut path = std::mem::replace(&mut cluster.path, Vec::new());
-            utils::transform_path(&mut path, &cluster.transform);
+            let mut path = std::mem::replace(&mut cluster.path, tree::PathData::new());
+            path.transform(cluster.transform);
 
-            segments.extend_from_slice(&path);
+            path_data.extend_from_slice(&path);
         }
     }
 
-    if segments.is_empty() {
+    if path_data.is_empty() {
         return None;
     }
 
     let mut fill = span.fill.take();
     if let Some(ref mut fill) = fill {
-        // fill-rule on text must always be `nonzero`,
-        // otherwise overlapped characters will be clipped.
+        // The `fill-rule` should be ignored.
+        // https://www.w3.org/TR/SVG2/text.html#TextRenderingOrder
+        //
+        // 'Since the fill-rule property does not apply to SVG text elements,
+        // the specific order of the subpaths within the equivalent path does not matter.'
         fill.rule = tree::FillRule::NonZero;
     }
 
@@ -249,7 +245,7 @@ fn convert_span(
         fill,
         stroke: span.stroke.take(),
         rendering_mode: tree::ShapeRendering::default(),
-        segments,
+        data: Rc::new(path_data),
     };
 
     Some(path)
@@ -271,21 +267,21 @@ fn dump_cluster(
 
     let mut base_path = tree::Path {
         transform: text_ts,
-        .. tree::Path::default()
+        ..tree::Path::default()
     };
 
     // Cluster bbox.
     let r = Rect::new(0.0, -cluster.ascent, cluster.advance, cluster.height()).unwrap();
     base_path.stroke = new_stroke(tree::Color::blue());
-    base_path.segments = utils::rect_to_path(r);
+    base_path.data = Rc::new(tree::PathData::from_rect(r));
     parent.append_kind(tree::NodeKind::Path(base_path.clone()));
 
     // Baseline.
     base_path.stroke = new_stroke(tree::Color::red());
-    base_path.segments = vec![
+    base_path.data = Rc::new(tree::PathData(vec![
         tree::PathSegment::MoveTo { x: 0.0,             y: 0.0 },
         tree::PathSegment::LineTo { x: cluster.advance, y: 0.0 },
-    ];
+    ]));
     parent.append_kind(tree::NodeKind::Path(base_path));
 }
 
@@ -336,7 +332,7 @@ fn convert_decoration(
 
     let thickness = span.font.underline_thickness(span.font_size);
 
-    let mut segments = Vec::new();
+    let mut path = tree::PathData::new();
     for dec_span in decoration_spans {
         let rect = Rect::new(
             0.0,
@@ -345,12 +341,12 @@ fn convert_decoration(
             thickness,
         ).unwrap();
 
-        let start_idx = segments.len();
-        add_rect_to_path(rect, &mut segments);
+        let start_idx = path.len();
+        add_rect_to_path(rect, &mut path);
 
         let mut ts = dec_span.transform;
         ts.translate(0.0, dy);
-        utils::transform_path(&mut segments[start_idx..], &ts);
+        path.transform_from(start_idx, ts);
     }
 
     tree::Path {
@@ -360,7 +356,7 @@ fn convert_decoration(
         fill: decoration.fill.take(),
         stroke: decoration.stroke.take(),
         rendering_mode: tree::ShapeRendering::default(),
-        segments,
+        data: Rc::new(path),
     }
 }
 

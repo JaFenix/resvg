@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::fs;
 
 pub use ttf_parser::{GlyphId, Weight, Width as Stretch};
 
+use crate::tree;
 use crate::utils;
 
 
@@ -9,6 +11,7 @@ use crate::utils;
 const GENERIC_FAMILIES: &[&str] = &["serif", "sans-serif", "monospace", "cursive", "fantasy"];
 
 
+#[derive(Clone, Debug)]
 pub struct FontItem {
     pub id: ID,
     pub path: PathBuf,
@@ -36,53 +39,37 @@ impl Database {
     }
 
     pub fn populate(&mut self) {
-        if !self.fonts.is_empty() {
-            return;
-        }
-
-        let mut id = 0;
-        for font in load_all_fonts() {
-            if let Some(item) = resolve_font(font, ID(id)) {
-                self.fonts.push(item);
-                id += 1;
-            }
+        if self.fonts.is_empty() {
+            load_all_fonts(&mut self.fonts);
         }
     }
 
+    #[inline(never)]
     #[cfg(target_os = "linux")]
-    fn populate_generic_fonts(&mut self) {
-        fn match_font(name: &str) -> Option<FontPath> {
-            let output = std::process::Command::new("fc-match")
-                .arg(name)
-                .arg("--format=%{index} %{file}")
-                .output().ok();
-            let output = try_opt_warn_or!(output, None, "Failed to run 'fc-match'.");
-            let stdout = std::str::from_utf8(&output.stdout).ok()?;
-
-            let index: u32 = stdout[0..1].parse().ok()?;
-            let path = stdout[2..].into();
-            Some(FontPath {
-                path,
-                index,
-                family: Some(name.to_string()),
-            })
-        }
-
+    fn collect_generic_fonts(&mut self) {
         if self.fonts.is_empty() {
             return;
         }
 
-        let mut id = self.fonts.last().map(|item| item.id.0).unwrap() + 1;
         for family in GENERIC_FAMILIES {
-            if let Some(font) = match_font(family) {
-                if let Some(item) = resolve_font(font, ID(id)) {
-                    self.fonts.push(item);
-                    id += 1;
-                }
-            }
+            self.collect_generic_font(family);
         }
 
         self.has_generic_fonts = true;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn collect_generic_font(&mut self, generic_family: &str) -> Option<()> {
+        let output = std::process::Command::new("fc-match")
+            .arg(generic_family)
+            .arg("--format=%{family}")
+            .output().ok();
+        let output = try_opt_warn_or!(output, None, "Failed to run 'fc-match'.");
+        let family = std::str::from_utf8(&output.stdout).ok()?.trim();
+
+        duplicate_family(family, generic_family, &mut self.fonts);
+
+        Some(())
     }
 
     pub fn font(&self, id: ID) -> &FontItem {
@@ -93,6 +80,7 @@ impl Database {
         &self.fonts
     }
 
+    #[inline(never)]
     pub fn select_best_match(
         &mut self,
         family_names: &[&str],
@@ -104,7 +92,7 @@ impl Database {
             #[cfg(target_os = "linux")]
             {
                 if !self.has_generic_fonts && GENERIC_FAMILIES.contains(family_name) {
-                    self.populate_generic_fonts();
+                    self.collect_generic_fonts();
                 }
             }
 
@@ -123,18 +111,20 @@ impl Database {
         None
     }
 
-    pub fn outline(&self, id: ID, glyph_id: GlyphId) -> Option<svgdom::Path> {
+    #[inline(never)]
+    pub fn outline(&self, id: ID, glyph_id: GlyphId) -> Option<tree::PathData> {
         // We can't simplify this code because of lifetimes.
         let item = self.font(id);
-        let file = std::fs::File::open(&item.path).ok()?;
+        let file = fs::File::open(&item.path).ok()?;
         let mmap = unsafe { memmap::MmapOptions::new().map(&file).ok()? };
         let font = ttf_parser::Font::from_data(&mmap, item.face_index).ok()?;
 
-        let mut builder = PathBuilder(svgdom::Path::new());
+        let mut builder = PathBuilder { path: tree::PathData::with_capacity(16) };
         font.outline_glyph(glyph_id, &mut builder).ok()?;
-        Some(builder.0)
+        Some(builder.path)
     }
 
+    #[inline(never)]
     pub fn has_char(&self, id: ID, c: char) -> bool {
         self._has_char(id, c).unwrap_or(false)
     }
@@ -142,7 +132,7 @@ impl Database {
     fn _has_char(&self, id: ID, c: char) -> Option<bool> {
         // We can't simplify this code because of lifetimes.
         let item = self.font(id);
-        let file = std::fs::File::open(&item.path).ok()?;
+        let file = fs::File::open(&item.path).ok()?;
         let mmap = unsafe { memmap::MmapOptions::new().map(&file).ok()? };
         let font = ttf_parser::Font::from_data(&mmap, item.face_index).ok()?;
 
@@ -151,10 +141,11 @@ impl Database {
         Some(true)
     }
 
+    #[inline(never)]
     pub fn load_font(&self, id: ID) -> Option<Font> {
         // We can't simplify this code because of lifetimes.
         let item = self.font(id);
-        let file = std::fs::File::open(&item.path).ok()?;
+        let file = fs::File::open(&item.path).ok()?;
         let mmap = unsafe { memmap::MmapOptions::new().map(&file).ok()? };
         let font = ttf_parser::Font::from_data(&mmap, item.face_index).ok()?;
 
@@ -213,38 +204,6 @@ impl Database {
             superscript_offset,
         })
     }
-}
-
-fn resolve_font(path: FontPath, id: ID) -> Option<FontItem> {
-    let file = std::fs::File::open(&path.path).ok()?;
-    let mmap = unsafe { memmap::MmapOptions::new().map(&file).ok()? };
-    let font = ttf_parser::Font::from_data(&mmap, path.index).ok()?;
-
-    let family = match path.family {
-        Some(f) => f,
-        None => font.family_name()?,
-    };
-
-    let style = if font.is_italic() {
-        Style::Italic
-    } else if font.is_oblique() {
-        Style::Oblique
-    } else {
-        Style::Normal
-    };
-
-    let weight = font.weight();
-    let stretch = font.width();
-
-    let properties = Properties { style, weight, stretch };
-
-    Some(FontItem {
-        id,
-        path: path.path,
-        face_index: path.index,
-        family,
-        properties,
-    })
 }
 
 
@@ -345,7 +304,14 @@ impl Default for Style {
     }
 }
 
+impl_enum_from_str!(Style,
+    "normal"    => Style::Normal,
+    "italic"    => Style::Italic,
+    "oblique"   => Style::Oblique
+);
+
 /// From https://github.com/pcwalton/font-kit
+#[inline(never)]
 fn find_best_match(
     candidates: &[Properties],
     query: Properties,
@@ -486,88 +452,75 @@ fn find_best_match(
     matching_set.into_iter().next()
 }
 
-struct PathBuilder(svgdom::Path);
+struct PathBuilder {
+    path: tree::PathData,
+}
 
 impl ttf_parser::OutlineBuilder for PathBuilder {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.0.push(svgdom::PathSegment::MoveTo { abs: true, x: x as f64, y: y as f64 });
+        self.path.push_move_to(x as f64, y as f64);
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        self.0.push(svgdom::PathSegment::LineTo { abs: true, x: x as f64, y: y as f64 });
+        self.path.push_line_to(x as f64, y as f64);
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.0.push(svgdom::PathSegment::Quadratic {
-            abs: true, x1: x1 as f64, y1: y1 as f64, x: x as f64, y: y as f64
-        });
+        self.path.push_quad_to(
+            x1 as f64, y1 as f64,
+            x as f64, y as f64,
+        );
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        self.0.push(svgdom::PathSegment::CurveTo {
-            abs: true,
-            x1: x1 as f64, y1: y1 as f64,
-            x2: x2 as f64, y2: y2 as f64,
-            x: x as f64, y: y as f64
-        });
+        self.path.push_curve_to(
+            x1 as f64, y1 as f64,
+            x2 as f64, y2 as f64,
+            x as f64, y as f64
+        );
     }
 
     fn close(&mut self) {
-        self.0.push(svgdom::PathSegment::ClosePath { abs: true });
+        self.path.push_close_path();
     }
 }
 
-#[derive(Debug)]
-struct FontPath {
-    path: PathBuf,
-    index: u32,
-    family: Option<String>,
-}
 
 #[cfg(target_os = "linux")]
-fn load_all_fonts() -> Vec<FontPath> {
-    let mut paths = Vec::new();
-    load_fonts_from("/usr/share/fonts/", &mut paths);
-    load_fonts_from("/usr/local/share/fonts/", &mut paths);
+fn load_all_fonts(fonts: &mut Vec<FontItem>) {
+    load_fonts_from("/usr/share/fonts/", fonts);
+    load_fonts_from("/usr/local/share/fonts/", fonts);
 
     if let Ok(ref home) = std::env::var("HOME") {
         let path = Path::new(home).join("/.local/share/fonts");
-        load_fonts_from(path.to_str().unwrap(), &mut paths);
+        load_fonts_from(path.to_str().unwrap(), fonts);
     }
-
-    paths
 }
 
 #[cfg(target_os = "windows")]
-fn load_all_fonts() -> Vec<FontPath> {
-    let mut paths = Vec::new();
-    load_fonts_from("C:\\Windows\\Fonts\\", &mut paths);
+fn load_all_fonts(fonts: &mut Vec<FontItem>) {
+    load_fonts_from("C:\\Windows\\Fonts\\", fonts);
 
-    let _ = load_font(Path::new("C:\\Windows\\Fonts\\times.ttf"), Some("serif"), &mut paths);
-    let _ = load_font(Path::new("C:\\Windows\\Fonts\\arial.ttf"), Some("sans-serif"), &mut paths);
-    let _ = load_font(Path::new("C:\\Windows\\Fonts\\cour.ttf"), Some("monospace"), &mut paths);
-    let _ = load_font(Path::new("C:\\Windows\\Fonts\\comic.ttf"), Some("cursive"), &mut paths);
-    let _ = load_font(Path::new("C:\\Windows\\Fonts\\impact.ttf"), Some("fantasy"), &mut paths);
-
-    paths
+    duplicate_family("Times New Roman", "serif", fonts);
+    duplicate_family("Arial", "sans-serif", fonts);
+    duplicate_family("Courier New", "monospace", fonts);
+    duplicate_family("Comic Sans MS", "cursive", fonts);
+    duplicate_family("Impact", "fantasy", fonts);
 }
 
 #[cfg(target_os = "macos")]
-fn load_all_fonts() -> Vec<FontPath> {
-    let mut paths = Vec::new();
-    load_fonts_from("/Library/Fonts", &mut paths);
-    load_fonts_from("/System/Library/Fonts", &mut paths);
+fn load_all_fonts(fonts: &mut Vec<FontItem>) {
+    load_fonts_from("/Library/Fonts", fonts);
+    load_fonts_from("/System/Library/Fonts", fonts);
 
-    let _ = load_font(Path::new("/Library/Fonts/Times New Roman.ttf"), Some("serif"), &mut paths);
-    let _ = load_font(Path::new("/Library/Fonts/Arial.ttf"), Some("sans-serif"), &mut paths);
-    let _ = load_font(Path::new("/Library/Fonts/Courier New.ttf"), Some("monospace"), &mut paths);
-    let _ = load_font(Path::new("/Library/Fonts/Comic Sans MS.ttf"), Some("cursive"), &mut paths);
-    let _ = load_font(Path::new("/Library/Fonts/Papyrus.ttc"), Some("fantasy"), &mut paths);
-
-    paths
+    duplicate_family("Times New Roman", "serif", fonts);
+    duplicate_family("Arial", "sans-serif", fonts);
+    duplicate_family("Courier New", "monospace", fonts);
+    duplicate_family("Comic Sans MS", "cursive", fonts);
+    duplicate_family("Papyrus", "fantasy", fonts);
 }
 
-fn load_fonts_from(dir: &str, paths: &mut Vec<FontPath>) {
+fn load_fonts_from(dir: &str, fonts: &mut Vec<FontItem>) {
     let fonts_dir = try_opt!(std::fs::read_dir(dir).ok());
     for entry in fonts_dir {
         if let Ok(entry) = entry {
@@ -576,12 +529,12 @@ fn load_fonts_from(dir: &str, paths: &mut Vec<FontPath>) {
                 match utils::file_extension(&path) {
                     Some("ttf") | Some("ttc") | Some("TTF") | Some("TTC") |
                     Some("otf") | Some("otc") | Some("OTF") | Some("OTC") => {
-                        let _ = load_font(&path, None, paths);
+                        let _ = load_font(&path, fonts);
                     }
                     _ => {}
                 }
             } else if path.is_dir() {
-                load_fonts_from(path.to_str().unwrap(), paths);
+                load_fonts_from(path.to_str().unwrap(), fonts);
             }
         }
     }
@@ -589,27 +542,66 @@ fn load_fonts_from(dir: &str, paths: &mut Vec<FontPath>) {
 
 fn load_font(
     path: &Path,
-    family: Option<&str>,
-    paths: &mut Vec<FontPath>,
-) -> Result<(), Box<std::error::Error>> {
-    let file = std::fs::File::open(path)?;
+    fonts: &mut Vec<FontItem>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let file = fs::File::open(path)?;
     let mmap = unsafe { memmap::MmapOptions::new().map(&file)? };
 
-    if let Some(n) = ttf_parser::fonts_in_collection(&mmap) {
-        for index in 0..n {
-            paths.push(FontPath {
-                path: path.to_owned(),
-                index,
-                family: family.map(|s| s.to_string()),
-            });
+    let n = ttf_parser::fonts_in_collection(&mmap).unwrap_or(1);
+    for index in 0..n {
+        if let Some(item) = resolve_font(&mmap, path, index, fonts.len()) {
+            fonts.push(item);
         }
-    } else {
-        paths.push(FontPath {
-            path: path.to_owned(),
-            index: 0,
-            family: family.map(|s| s.to_string()),
-        });
     }
 
     Ok(())
+}
+
+fn resolve_font(
+    data: &[u8],
+    path: &Path,
+    index: u32,
+    id: usize,
+) -> Option<FontItem> {
+    let font = ttf_parser::Font::from_data(data, index).ok()?;
+
+    let family = font.family_name()?;
+
+    let style = if font.is_italic() {
+        Style::Italic
+    } else if font.is_oblique() {
+        Style::Oblique
+    } else {
+        Style::Normal
+    };
+
+    let weight = font.weight();
+    let stretch = font.width();
+
+    let properties = Properties { style, weight, stretch };
+
+    Some(FontItem {
+        id: ID(id as u16),
+        path: path.to_path_buf(),
+        face_index: index,
+        family,
+        properties,
+    })
+}
+
+fn duplicate_family(
+    old_family: &str,
+    new_family: &str,
+    fonts: &mut Vec<FontItem>,
+) {
+    let mut i = 0;
+    while i < fonts.len() {
+        if fonts[i].family == old_family {
+            let mut new_font = fonts[i].clone();
+            new_font.family = new_family.to_string();
+            fonts.push(new_font);
+        }
+
+        i += 1;
+    }
 }
