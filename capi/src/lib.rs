@@ -605,6 +605,23 @@ pub extern "C" fn resvg_get_image_size(
 }
 
 #[no_mangle]
+pub extern "C" fn resvg_get_image_screen_size(
+    tree: *const resvg_render_tree,
+) -> resvg_size {
+    let tree = unsafe {
+        assert!(!tree.is_null());
+        &*tree
+    };
+
+    let screen_size = tree.0.svg_node().size.to_screen_size();
+
+    resvg_size {                            
+        width: screen_size.width(),
+        height: screen_size.height(),
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn resvg_get_image_viewbox(
     tree: *const resvg_render_tree,
 ) -> resvg_rect {

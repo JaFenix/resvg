@@ -312,6 +312,20 @@ bool resvg_is_image_empty(const resvg_render_tree *tree);
 resvg_size resvg_get_image_size(const resvg_render_tree *tree);
 
 /**
+ * @brief Returns an image screen size.
+ *
+ * The screen size of a canvas required to render this SVG.
+ * This differs from resvg_get_image_size in that it rounds tree width
+ * and height to the nearest integer instead of truncating after the
+ * decimal point.  Use with resvg_skia_render_rect_to_canvas when
+ * the source rectangle must be the entire SVG image.
+ *
+ * @param tree Render tree.
+ * @return Image screen size.
+ */
+resvg_size resvg_get_image_screen_size(const resvg_render_tree *tree);
+
+/**
  * @brief Returns an image viewbox.
  *
  * @param tree Render tree.
